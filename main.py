@@ -1,78 +1,154 @@
-#phase 1 imports
+# main.py
 import streamlit as st
-
-#phase 2 imports
 import os
+import re
+
+# --------------------------
+# Groq + LangChain imports
+# --------------------------
 from langchain_groq import ChatGroq
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
-#phase 3 imports
-from langchain.embeddings import HuggingFaceEmbeddings
+# Updated imports from langchain_community
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.document_loaders import PyPDFLoader
 from langchain.indexes import VectorstoreIndexCreator
 from langchain.chains import RetrievalQA
 
+# --------------------------
+# Streamlit page setup
+# --------------------------
+st.set_page_config(page_title="Sudip's ChatBot", page_icon="🤖")
 st.title("The ChatBot by Sudip Paneru")
 
-#   Setup a session state variabe to hold all the old messages
-if 'messages'   not in st.session_state:
-        st.session_state.messages    =   []
+# --------------------------
+# Initialize session state for chat messages
+# --------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-#   Display old messages
+# Display previous messages
 for message in st.session_state.messages:
-        st.chat_message(message['role']).markdown(message['content'])
+    st.chat_message(message["role"]).markdown(message["content"])
 
+# --------------------------
+# PDF Upload UI
+# --------------------------
+uploaded_files = st.file_uploader(
+    "Upload PDFs",
+    type="pdf",
+    accept_multiple_files=True
+)
+
+# --------------------------
+# Vectorstore creation
+# --------------------------
 @st.cache_resource
-def get_vectorstore():
-        pdf_name = []
-        loaders = {PyPDFLoader(pdf_name)}
-        # Create chunks, aka vectors (ChromaDb)
-        index = VectorstoreIndexCreator(
-                embedding = HuggingFaceEmbeddings(model_name='all-MiniLM-L12-v2'),
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size = 1000, chunk_overlap = 100)   
-        ).from_loaders(loaders)
-        return index.vectorstore
+def get_vectorstore(uploaded_files):
+    """
+    Convert uploaded PDFs into a vectorstore using embeddings
+    """
+    loaders = []
 
-#   Prompt From User
-prompt  =   st.chat_input("Prompt here")
+    for uploaded_file in uploaded_files:
+        # Save PDF temporarily
+        temp_path = f"temp_{uploaded_file.name}"
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        # Load PDF into PyPDFLoader
+        loader = PyPDFLoader(temp_path)
+        loaders.append(loader)
 
-#   If prompt is available
+    if not loaders:
+        return None
+
+    # Create vectorstore using embeddings
+    index = VectorstoreIndexCreator(
+        embedding=HuggingFaceEmbeddings(model_name="all-MiniLM-L12-v2"),
+        text_splitter=RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    ).from_loaders(loaders)
+
+    return index.vectorstore
+
+# --------------------------
+# Helper function to clean model output
+# --------------------------
+def clean_response(text):
+    """
+    Removes <think>...</think> blocks from Groq output
+    """
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    return cleaned
+
+# --------------------------
+# User prompt input
+# --------------------------
+prompt = st.chat_input("Type your question here...")
+
 if prompt:
-        #   Pass the prompt to llm and Save the prompt and response
-        st.chat_message('user').markdown(prompt)
-        st.session_state.messages.append({'role':'user','content':prompt})
+    # Display user message
+    st.chat_message("user").markdown(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
 
-        groq_sys_prompt = ChatPromptTemplate.from_template(""" You are a an virtual assastent that helps in the company :{user_prompt}
-                                                           """)
-        model = "llama3-8b-8192"
-        groq_chat   = ChatGroq(
-                groq_api_key = os.environ.get("GROQ_API_KEY")
+    # --------------------------
+    # System prompt for Groq
+    # --------------------------
+    groq_sys_prompt = ChatPromptTemplate.from_template("""
+    You are a professional virtual assistant. Only provide the final answer.
+    Do NOT include any internal thoughts or reasoning.
+    Query: {user_prompt}
+    """)
 
-        )
+    # --------------------------
+    # Initialize ChatGroq
+    # --------------------------
+    groq_api_key = os.environ.get("GROQ_API_KEY")
+    if not groq_api_key:
+        st.error("GROQ_API_KEY not set in environment.")
+        st.stop()  # Stop execution if API key missing
 
-        try:
-             vectorstore = get_vectorstore()
-             if vectorstore is None:
-                st.error("Failed to load the document")
-             
-             chain = RetrievalQA.from_chain_type(
-                    llm = groq_chat,
-                    chain_type = 'stuff',
-                    retriever = vectorstore.as_retriver(search_kwargs = ({"k":3})),
-                    return_source_document = True
-             )
-             result = chain({"query":prompt})
-             response = result["result"]
+    groq_chat = ChatGroq(
+        groq_api_key=groq_api_key,
+        model="qwen/qwen3-32b"
+    )
 
-        
-             chain = groq_sys_prompt | groq_chat | StrOutputParser()
-             response = chain.invoke({"user_prompt":prompt})
+    try:
+        # --------------------------
+        # Create vectorstore if PDFs uploaded
+        # --------------------------
+        vectorstore = None
+        if uploaded_files:
+            vectorstore = get_vectorstore(uploaded_files)
+            if vectorstore is None:
+                st.error("Failed to process uploaded PDFs")
 
-                #response    =   "I am your assistant"
-             st.chat_message('assistant').markdown(response)
-             st.session_state.messages.append({'role':'assistant','content':response})
+        # --------------------------
+        # If PDFs uploaded, use RetrievalQA
+        # --------------------------
+        if vectorstore:
+            chain = RetrievalQA.from_chain_type(
+                llm=groq_chat,
+                chain_type="stuff",
+                retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
+                return_source_documents=True
+            )
+            result = chain({"query": prompt})
+            response = result["result"]
+        else:
+            # --------------------------
+            # Otherwise, just use system prompt
+            # --------------------------
+            chain = groq_sys_prompt | groq_chat | StrOutputParser()
+            raw_response = chain.invoke({"user_prompt": prompt})
+            response = clean_response(raw_response)
 
-        except Exception as e:
-                st.error(f"Error: {str(e)}")
+        # --------------------------
+        # Display assistant response
+        # --------------------------
+        st.chat_message("assistant").markdown(response)
+        st.session_state.messages.append({"role": "assistant", "content": response})
+
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
