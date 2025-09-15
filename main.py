@@ -21,7 +21,7 @@ from langchain.chains import RetrievalQA
 # Streamlit page setup
 # --------------------------
 st.set_page_config(page_title="Sudip's ChatBot", page_icon="🤖")
-st.title("The ChatBot by Sudip Paneru")
+st.title("ChatBot by Sudip Paneru")
 
 # --------------------------
 # Initialize session state for chat messages
@@ -135,7 +135,8 @@ if prompt:
                 return_source_documents=True
             )
             result = chain({"query": prompt})
-            response = result["result"]
+            raw_response = result["result"]
+            response = clean_response(raw_response)
         else:
             # --------------------------
             # Otherwise, just use system prompt
